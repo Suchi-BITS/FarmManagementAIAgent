@@ -1,44 +1,41 @@
 # config/settings.py
-# Farm Management AI System Configuration
+# Farm Management AI Agent v2 — Hierarchical Multi-Agent + RAG
 
-from pydantic import BaseModel, Field
-from typing import Optional
 import os
-from dotenv import load_dotenv
+from dataclasses import dataclass, field
+from typing import List
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
-class FarmConfig(BaseModel):
-    """Core configuration for the farm management system."""
-
-    # LLM settings
-    openai_api_key: str = Field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    model_name: str = "gpt-4o"
-    temperature: float = 0.1
-    max_tokens: int = 2048
+@dataclass
+class FarmConfig:
+    # LLM
+    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    model_name:     str  = "gpt-4o"
+    temperature:    float = 0.1
 
     # Farm identity
-    farm_name: str = "AgriSense Farm"
-    farm_location: str = "Central Valley, CA"
+    farm_name:       str   = "AgriSense Farm"
+    farm_location:   str   = "Central Valley, CA"
     farm_area_acres: float = 150.0
+    crops:           List[str] = field(default_factory=lambda: ["wheat", "corn", "soybeans"])
 
-    # Crop types being managed
-    crops: list[str] = ["wheat", "corn", "soybeans"]
+    # Thresholds
+    critical_moisture_low:  float = 20.0
+    critical_moisture_high: float = 80.0
+    frost_warning_c:        float = 2.0
+    heat_stress_c:          float = 35.0
+    planning_horizon_days:  int   = 14
 
-    # Monitoring intervals (in seconds, for simulation)
-    weather_check_interval: int = 3600       # 1 hour
-    soil_check_interval: int = 1800          # 30 minutes
-    growth_check_interval: int = 86400       # 24 hours
-
-    # Decision thresholds
-    critical_soil_moisture_low: float = 20.0   # percent
-    critical_soil_moisture_high: float = 80.0  # percent
-    frost_warning_temp_c: float = 2.0
-    heat_stress_temp_c: float = 35.0
-
-    # Scheduling horizon (days)
-    planning_horizon_days: int = 14
+    disclaimer: str = (
+        "AI-generated farm recommendations. Always verify with your agronomist "
+        "before executing high-cost or irreversible field operations."
+    )
 
 
 farm_config = FarmConfig()
