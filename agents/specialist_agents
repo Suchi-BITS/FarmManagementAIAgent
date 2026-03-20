@@ -1,0 +1,347 @@
+# agents/specialist_agents.py
+# Farm Management v2 — Four Specialist Agents running in parallel beneath supervisor
+#
+# Architecture: Hierarchical Multi-Agent
+#
+#   SUPERVISOR
+#      |
+#      +-- SOIL AGENT      (soil health, moisture, nutrients, compaction)
+#      +-- CROP AGENT      (growth stages, pest/disease, yield forecasts)
+#      +-- IRRIGATION AGENT (water scheduling, deficit management)
+#      +-- HARVEST AGENT   (timing windows, market readiness)
+#
+# Each specialist:
+#   1. Queries RAG for relevant agronomic guidelines
+#   2. Reads simulation data (or real sensors in production)
+#   3. Calls LLM with RAG context injected into the prompt
+#   4. Returns a structured analysis dict to the supervisor
+
+import json
+from datetime import datetime
+from config.settings import farm_config
+from data.simulation import get_weather, get_soil_readings, get_crop_readings, get_market_prices
+from rag.knowledge_base import FARM_KB
+from agents.base import call_llm
+
+
+# ── Soil Specialist ───────────────────────────────────────────────────────────
+
+def run_soil_agent(state: dict) -> dict:
+    """
+    Analyses soil health across all farm zones.
+    RAG: retrieves soil moisture thresholds, pH guidelines, compaction protocols.
+    Outputs: per-zone soil status, critical alerts, nutrient flags.
+    """
+    print("  [SOIL AGENT] Analysing soil conditions across all zones...")
+    soil_data  = state.get("soil_data") or get_soil_readings()
+    state["soil_data"] = soil_data
+
+    # RAG retrieval
+    rag_moisture = FARM_KB.retrieve_text("soil moisture critical threshold irrigation trigger", top_k=1)
+    rag_ph       = FARM_KB.retrieve_text("soil pH nutrient availability deficiency", top_k=1)
+    rag_compact  = FARM_KB.retrieve_text("soil compaction index tillage remediation", top_k=1)
+
+    alerts = []
+    zone_summaries = []
+    for zone in soil_data:
+        issues = []
+        if zone["moisture_percent"] < farm_config.critical_moisture_low:
+            issues.append(f"CRITICAL LOW MOISTURE {zone['moisture_percent']}%")
+            alerts.append({"zone": zone["zone_id"], "type": "moisture_critical_low",
+                           "value": zone["moisture_percent"]})
+        if zone["moisture_percent"] > farm_config.critical_moisture_high:
+            issues.append(f"WATERLOGGING RISK {zone['moisture_percent']}%")
+            alerts.append({"zone": zone["zone_id"], "type": "waterlogging_risk",
+                           "value": zone["moisture_percent"]})
+        if zone["ph"] < 5.8 or zone["ph"] > 7.2:
+            issues.append(f"pH OUT OF RANGE {zone['ph']}")
+        if zone["nitrogen_ppm"] < 20:
+            issues.append(f"NITROGEN DEFICIENCY {zone['nitrogen_ppm']} ppm")
+            alerts.append({"zone": zone["zone_id"], "type": "nitrogen_deficiency",
+                           "value": zone["nitrogen_ppm"]})
+        if zone["compaction_index"] > 50:
+            issues.append(f"COMPACTION {zone['compaction_index']}")
+        zone_summaries.append({
+            "zone":     zone["zone_id"],
+            "crop":     zone["crop"],
+            "moisture": zone["moisture_percent"],
+            "ph":       zone["ph"],
+            "N_ppm":    zone["nitrogen_ppm"],
+            "compact":  zone["compaction_index"],
+            "issues":   issues,
+        })
+
+    demo = (
+        f"Soil analysis complete. {len(soil_data)} zones assessed.\n"
+        f"Zones with issues: {sum(1 for z in zone_summaries if z['issues'])}/{len(zone_summaries)}\n"
+        f"Critical alerts: {len(alerts)}\n"
+        + "\n".join(
+            f"  {z['zone']} ({z['crop']}): moisture={z['moisture']}%, pH={z['ph']}, "
+            f"N={z['N_ppm']}ppm, compaction={z['compact']} "
+            f"{'— ' + '; '.join(z['issues']) if z['issues'] else '— OK'}"
+            for z in zone_summaries
+        )
+    )
+
+    analysis = call_llm(
+        system_prompt=(
+            f"You are the Soil Specialist Agent for {farm_config.farm_name}.\n"
+            f"Analyse soil health across farm zones and recommend corrective actions.\n\n"
+            f"RETRIEVED AGRONOMIC KNOWLEDGE:\n{rag_moisture}\n{rag_ph}\n{rag_compact}"
+        ),
+        user_prompt=(
+            f"Soil zone data:\n{json.dumps(zone_summaries, indent=2)}\n\n"
+            f"Identify: (1) urgent issues requiring action today, "
+            f"(2) nutrient application needs, (3) irrigation priorities by zone."
+        ),
+        demo_response=demo,
+    )
+
+    state["soil_analysis"]  = analysis
+    state["soil_alerts"]    = alerts
+    state["current_agent"]  = "crop_agent"
+    print(f"  [SOIL AGENT] Done — {len(alerts)} alert(s)")
+    return state
+
+
+# ── Crop Specialist ───────────────────────────────────────────────────────────
+
+def run_crop_agent(state: dict) -> dict:
+    """
+    Monitors crop growth stages, pest and disease pressure, and yield forecasts.
+    RAG: retrieves growth stage decision points and pest/disease intervention thresholds.
+    """
+    print("  [CROP AGENT] Monitoring crop growth stages and health...")
+    crop_data  = state.get("crop_data") or get_crop_readings()
+    weather    = state.get("weather_data") or get_weather()
+    state["crop_data"]    = crop_data
+    state["weather_data"] = weather
+
+    # RAG retrieval
+    rag_stages = FARM_KB.retrieve_text("crop growth stage decision irrigation nitrogen application", top_k=1)
+    rag_pest   = FARM_KB.retrieve_text("pest disease economic threshold intervention spray", top_k=1)
+
+    alerts = []
+    zone_summaries = []
+    for zone in crop_data:
+        issues = []
+        if zone["pest_pressure"] in ("medium", "high"):
+            issues.append(f"PEST {zone['pest_pressure'].upper()}")
+            if zone["pest_pressure"] == "high":
+                alerts.append({"zone": zone["zone_id"], "type": "pest_high",
+                               "crop": zone["crop"]})
+        if zone["disease_risk"] in ("medium", "high"):
+            issues.append(f"DISEASE {zone['disease_risk'].upper()}")
+            alerts.append({"zone": zone["zone_id"], "type": "disease_risk",
+                           "crop": zone["crop"]})
+        if zone["ndvi"] < 0.4:
+            issues.append(f"LOW NDVI {zone['ndvi']} — possible stress")
+        zone_summaries.append({
+            "zone":    zone["zone_id"],
+            "crop":    zone["crop"],
+            "stage":   zone["growth_stage"],
+            "dap":     zone["days_since_planting"],
+            "dth":     zone["days_to_harvest"],
+            "ndvi":    zone["ndvi"],
+            "pest":    zone["pest_pressure"],
+            "disease": zone["disease_risk"],
+            "yield_t_ha": zone["yield_forecast_t_ha"],
+            "issues":  issues,
+        })
+
+    demo = (
+        f"Crop monitoring complete. {len(crop_data)} zones assessed.\n"
+        + "\n".join(
+            f"  {z['zone']} ({z['crop']}, {z['stage']}): "
+            f"NDVI={z['ndvi']}, pest={z['pest']}, disease={z['disease']}, "
+            f"yield={z['yield_t_ha']} t/ha, DtH={z['dth']} days"
+            + (f" — ALERTS: {'; '.join(z['issues'])}" if z["issues"] else "")
+            for z in zone_summaries
+        )
+    )
+
+    analysis = call_llm(
+        system_prompt=(
+            f"You are the Crop Health Specialist Agent for {farm_config.farm_name}.\n"
+            f"Analyse crop growth and health status and recommend interventions.\n\n"
+            f"RETRIEVED AGRONOMIC KNOWLEDGE:\n{rag_stages}\n{rag_pest}"
+        ),
+        user_prompt=(
+            f"Crop zone data:\n{json.dumps(zone_summaries, indent=2)}\n"
+            f"Weather context: temp={weather['temperature_c']}C, "
+            f"humidity={weather['humidity_percent']}%, precip={weather['precipitation_mm']}mm\n\n"
+            f"For each zone identify: (1) growth stage action required, "
+            f"(2) pest/disease intervention decision, (3) yield risk factors."
+        ),
+        demo_response=demo,
+    )
+
+    state["crop_analysis"] = analysis
+    state["crop_alerts"]   = alerts
+    state["current_agent"] = "irrigation_agent"
+    print(f"  [CROP AGENT] Done — {len(alerts)} alert(s)")
+    return state
+
+
+# ── Irrigation Specialist ─────────────────────────────────────────────────────
+
+def run_irrigation_agent(state: dict) -> dict:
+    """
+    Plans irrigation schedules using soil moisture data, crop water demands,
+    and weather forecasts. RAG: retrieves ET-based scheduling and waterlogging protocols.
+    """
+    print("  [IRRIGATION AGENT] Planning irrigation schedule...")
+    soil_data   = state.get("soil_data") or get_soil_readings()
+    crop_data   = state.get("crop_data") or get_crop_readings()
+    weather     = state.get("weather_data") or get_weather()
+
+    # RAG retrieval
+    rag_sched = FARM_KB.retrieve_text("irrigation scheduling evapotranspiration ET water use crop", top_k=1)
+    rag_water = FARM_KB.retrieve_text("waterlogging drainage stop irrigation soil moisture 80", top_k=1)
+
+    soil_by_zone = {s["zone_id"]: s for s in soil_data}
+    crop_by_zone = {c["zone_id"]: c for c in crop_data}
+    actions = []
+
+    for zone_id, soil in soil_by_zone.items():
+        crop = crop_by_zone.get(zone_id, {})
+        moisture = soil["moisture_percent"]
+        stage    = crop.get("growth_stage", "vegetative")
+        rain_48h = sum(d["precip_mm"] for d in weather["forecast_7day"][:2])
+
+        if moisture > 80:
+            actions.append({
+                "zone": zone_id, "action": "stop",
+                "reason": f"Waterlogging risk — moisture {moisture}%",
+                "priority": "critical", "water_liters": 0,
+            })
+        elif moisture < farm_config.critical_moisture_low:
+            actions.append({
+                "zone": zone_id, "action": "irrigate",
+                "reason": f"Critical low moisture {moisture}% — {stage}",
+                "priority": "critical", "water_liters": 4500,
+            })
+        elif moisture < 40 and stage in ("flowering", "grain_fill") and rain_48h < 5:
+            actions.append({
+                "zone": zone_id, "action": "irrigate",
+                "reason": f"Reproductive stage, moisture {moisture}%, low rain forecast",
+                "priority": "high", "water_liters": 3000,
+            })
+        elif rain_48h > 10:
+            actions.append({
+                "zone": zone_id, "action": "defer",
+                "reason": f"Rain forecast {rain_48h:.1f}mm — conserve irrigation",
+                "priority": "low", "water_liters": 0,
+            })
+        else:
+            actions.append({
+                "zone": zone_id, "action": "maintain",
+                "reason": f"Moisture {moisture}% — within range",
+                "priority": "normal", "water_liters": 1500,
+            })
+
+    demo = (
+        f"Irrigation plan: {len(actions)} zone actions\n"
+        + "\n".join(
+            f"  {a['zone']}: {a['action'].upper()} [{a['priority']}] — {a['reason']}"
+            for a in actions
+        )
+    )
+
+    analysis = call_llm(
+        system_prompt=(
+            f"You are the Irrigation Specialist Agent for {farm_config.farm_name}.\n"
+            f"Produce an efficient water management schedule.\n\n"
+            f"RETRIEVED AGRONOMIC KNOWLEDGE:\n{rag_sched}\n{rag_water}"
+        ),
+        user_prompt=(
+            f"Irrigation actions computed:\n{json.dumps(actions, indent=2)}\n"
+            f"Rain forecast next 48h: {rain_48h:.1f}mm\n"
+            f"Validate and refine the plan with ET-based reasoning."
+        ),
+        demo_response=demo,
+    )
+
+    state["irrigation_analysis"] = analysis
+    state["irrigation_actions"]  = actions
+    state["current_agent"]       = "harvest_agent"
+    print(f"  [IRRIGATION AGENT] Done — {len(actions)} zone action(s)")
+    return state
+
+
+# ── Harvest Specialist ────────────────────────────────────────────────────────
+
+def run_harvest_agent(state: dict) -> dict:
+    """
+    Determines harvest readiness, timing windows, and market considerations.
+    RAG: retrieves harvest moisture thresholds and commodity price decision rules.
+    """
+    print("  [HARVEST AGENT] Assessing harvest readiness and timing...")
+    crop_data = state.get("crop_data") or get_crop_readings()
+    weather   = state.get("weather_data") or get_weather()
+    prices    = get_market_prices()
+
+    # RAG retrieval
+    rag_harvest = FARM_KB.retrieve_text("harvest timing moisture grain quality shattering", top_k=1)
+    rag_market  = FARM_KB.retrieve_text("commodity price forward contract wheat corn soybeans", top_k=1)
+
+    ready = []
+    upcoming = []
+    for zone in crop_data:
+        dth = zone["days_to_harvest"]
+        if dth <= 5:
+            ready.append({
+                "zone": zone["zone_id"], "crop": zone["crop"],
+                "days_to_harvest": dth,
+                "yield_t_ha": zone["yield_forecast_t_ha"],
+                "urgency": "now" if dth <= 2 else "this_week",
+            })
+        elif dth <= 14:
+            upcoming.append({
+                "zone": zone["zone_id"], "crop": zone["crop"],
+                "days_to_harvest": dth,
+                "yield_t_ha": zone["yield_forecast_t_ha"],
+            })
+
+    # Weather window assessment
+    dry_days = sum(1 for d in weather["forecast_7day"] if d["precip_mm"] < 5)
+    window_ok = dry_days >= 3
+
+    price_signal = prices["wheat_usd_per_bushel"] > 7.0
+
+    demo = (
+        f"Harvest assessment: {len(ready)} zone(s) ready, {len(upcoming)} upcoming.\n"
+        f"Weather window: {'GOOD' if window_ok else 'POOR'} ({dry_days}/7 dry days forecast)\n"
+        f"Market prices: wheat ${prices['wheat_usd_per_bushel']}/bu, "
+        f"corn ${prices['corn_usd_per_bushel']}/bu, "
+        f"soybeans ${prices['soybeans_usd_per_bushel']}/bu\n"
+        f"Forward contract signal: {'FAVOURABLE' if price_signal else 'HOLD'}\n"
+        + ("\nREADY TO HARVEST:\n" + "\n".join(
+            f"  {r['zone']} ({r['crop']}): {r['days_to_harvest']}d — {r['urgency'].upper()}"
+            for r in ready
+        ) if ready else "")
+    )
+
+    analysis = call_llm(
+        system_prompt=(
+            f"You are the Harvest Specialist Agent for {farm_config.farm_name}.\n"
+            f"Determine optimal harvest timing and market strategy.\n\n"
+            f"RETRIEVED AGRONOMIC KNOWLEDGE:\n{rag_harvest}\n{rag_market}"
+        ),
+        user_prompt=(
+            f"Ready zones: {json.dumps(ready, indent=2)}\n"
+            f"Upcoming: {json.dumps(upcoming, indent=2)}\n"
+            f"Weather window: {dry_days}/7 forecast dry days\n"
+            f"Prices: {json.dumps(prices)}\n"
+            f"Recommend harvest priority order and market actions."
+        ),
+        demo_response=demo,
+    )
+
+    state["harvest_analysis"] = analysis
+    state["harvest_ready"]    = ready
+    state["harvest_upcoming"] = upcoming
+    state["market_prices"]    = prices
+    state["current_agent"]    = "supervisor"
+    print(f"  [HARVEST AGENT] Done — {len(ready)} zone(s) ready")
+    return state
