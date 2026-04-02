@@ -586,10 +586,29 @@ RAG KNOWLEDGE RETRIEVED:
 ```
 
 ---
+How to Run
+1. Clone the repo
+2. Create venv
+3. Update .env
+4. pip install -r requirements.txt
+5. python main.py
+   
+Whats Next
+1. Fix logic vs LLM mismatch
 
-## Disclaimer
+Ensure:
 
-AI-generated farm recommendations. Always verify with your agronomist before
-executing high-cost or irreversible field operations such as emergency irrigation,
-pesticide applications, or harvest timing decisions. Simulation data does not
-represent actual field conditions.
+LLM respects agent outputs
+2. Add confidence scores
+"confidence": 0.82
+3. Add retry / fallback
+
+If LLM fails → deterministic summary
+
+4. Add logging per agent
+
+Useful for debugging + FinOps
+
+🔧 5. Add cost tracking (very relevant to you)
+Soil Agent → $0.002
+Crop Agent → $0.003
