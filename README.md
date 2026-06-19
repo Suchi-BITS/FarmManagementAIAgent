@@ -612,3 +612,139 @@ Useful for debugging + FinOps
 🔧 5. Add cost tracking (very relevant to you)
 Soil Agent → $0.002
 Crop Agent → $0.003
+
+# AI Farm Management Agent System — Next Steps
+
+Current state: The system runs as a Python command-line process with a hierarchical multi-agent architecture — a supervisor coordinating four specialist agents (soil, crop, irrigation, harvest) — plus a 10-chunk RAG knowledge base of agronomic documents. It produces a prioritised farm operations report with zone-level alerts, irrigation schedules, harvest readiness assessments, and market contracting signals.
+
+---
+
+## How End Users Access the System Today
+
+The system currently runs as a command-line Python script:
+
+    python main.py
+
+A farm manager or agronomist must be present at a terminal to run it and read the text output. The report prints to the console and is not saved anywhere, sent anywhere, or accessible on a mobile device in the field.
+
+---
+
+## Recommended Production Access Model
+
+A mobile-first web application is the right access model for this system. The reasoning is grounded in where farm managers actually work and what they need.
+
+Farm managers are in the field, not at a desk. They are checking soil sensors while walking a zone, or on a tractor deciding whether to irrigate or defer. The output needs to reach them on a smartphone with a simple, scannable interface. A full terminal report is the wrong format for that context.
+
+The practical access model is a lightweight REST API serving a progressive web app that works on mobile browsers without requiring an app store installation. The report should be structured as a series of simple status cards — one per zone, one per alert type — that a farm manager can scan in under 30 seconds. Drill-down detail should be available on tap.
+
+For larger farm operations with multiple staff, a shared web dashboard with role-based access is more appropriate. The agronomist sees the full technical analysis. The irrigation manager sees only irrigation actions. The harvest coordinator sees only harvest readiness and market signals.
+
+For very small operations, a WhatsApp or SMS daily summary is the simplest possible production access model. The system runs on a schedule, formats the top three priority actions as a short text message, and sends it via Twilio to the farm manager's phone number.
+
+---
+
+## Next Action Items
+
+### Step 1 — Add Human-in-the-Loop for High-Cost Field Operations
+
+Currently all four specialist agents produce recommendations that are printed to the console with no approval gate. Some of these recommendations are low-stakes and can be automated. Others are high-cost and irreversible and should require explicit farm manager confirmation before any downstream system acts on them.
+
+The distinction matters:
+
+Low-stakes actions that can auto-notify include routine irrigation schedule reminders, weather alerts, and standard pest scouting reminders. Sending these as notifications without approval is appropriate.
+
+High-cost actions that require explicit approval before execution include emergency irrigation orders that activate pump systems, pesticide application recommendations that require scheduling an agrochemical contractor, and harvest go or no-go decisions that commit harvest machinery and labour.
+
+What to build is an approval queue in the supervisor agent output. Each planned action is tagged as auto or requires_approval based on its estimated cost tier. The farm manager receives a mobile notification for requires_approval items and must tap Approve or Defer before the system logs the action as confirmed.
+
+This approval gate is also the mechanism for feeding confirmed action outcomes back into the system, which directly improves recommendation quality over time.
+
+---
+
+### Step 2 — Connect Real Sensor and Weather APIs
+
+The system uses a date-seeded random number generator for all four data streams. The production data layer replacement code is already written in farm_v2_simulation_production.py.
+
+Recommended priority order:
+
+First, connect OpenWeatherMap for weather data. The free tier gives 1,000 calls per day, which is more than enough for a 150-acre farm running one cycle per hour. This is a one-day integration.
+
+Second, connect the soil sensor gateway API. This requires LoRaWAN sensors deployed in each zone (Sentek EnviroSCAN or Stevens HydraProbe are the market leaders) and a cellular gateway transmitting readings to a cloud API. The _parse_gateway_response() function in farm_v2_simulation_production.py handles the field name mapping for your specific gateway.
+
+Third, connect Google Earth Engine for Sentinel-2 NDVI crop monitoring. This gives real canopy health data from satellite imagery every 5 days, which is sufficient for weekly crop growth stage assessment.
+
+Fourth, connect CME DataMine or USDA NASS Quick Stats for commodity prices. USDA NASS is free and gives weekly cash prices, which is adequate for harvest and contracting decisions.
+
+Replace one function at a time in data/simulation.py. No agent, graph, or tool code changes are needed.
+
+---
+
+### Step 3 — Serve the Farm Report via a REST API and Mobile Interface
+
+Wrap the agent in a FastAPI service so the farm report is accessible on any device.
+
+The minimum API surface needed is:
+
+    POST /run               trigger a full monitoring cycle
+    GET  /report/latest     the most recent farm report as JSON
+    GET  /alerts            active alerts sorted by priority
+    GET  /irrigation        zone-level irrigation actions for today
+    GET  /harvest           harvest readiness and market signals
+
+The mobile web app consumes these endpoints and renders the report as zone cards. Each zone card shows the zone ID, crop, overall status colour (green, amber, red), the top alert if any, and the irrigation action for today. The farm manager taps a zone card to see the full specialist analysis for that zone.
+
+This architecture also enables the farm's irrigation control system to read from GET /irrigation and automatically adjust pump schedules, which is the first step toward closed-loop automated irrigation.
+
+---
+
+### Step 4 — Add Long-Term Agronomic Memory
+
+The current system has no memory between runs. Each invocation is completely independent. The farm report has no awareness of what happened yesterday, what the soil moisture trend has been over the past two weeks, or whether the pest pressure in Zone Z-NORTH has been increasing over successive monitoring cycles.
+
+Long-term agronomic memory changes the quality of recommendations substantially. An agent that knows soil moisture in Z-SOUTH has been declining for five consecutive days will recommend irrigation before the critical threshold is crossed, not after.
+
+The minimum memory schema needed is:
+
+A zone_readings table storing one row per zone per monitoring cycle, capturing moisture, pH, nitrogen, NDVI, pest pressure, and disease risk with a timestamp. This enables trend detection across any time window.
+
+An actions_log table storing every recommendation made with its zone, type, priority, and whether it was approved and executed. This enables the supervisor agent to avoid making the same recommendation repeatedly when it has already been acted on.
+
+A harvest_records table storing actual harvest dates, measured moisture at harvest, and yield per zone. This enables the harvest agent to calibrate its yield forecasts against real outcomes over time.
+
+The upgrade path from in-process to persistent storage requires only replacing the data fetch functions to read from the database before falling back to the sensor API. No agent or graph code changes.
+
+---
+
+### Step 5 — Build a Season-Long Planning Module
+
+The current system operates on a single monitoring cycle and plans up to 14 days ahead. A full farm management system needs a season-long view that covers planting through harvest.
+
+A planning module would run once per week rather than continuously. It reads the current zone readings, the historical trend data from the database, the 30-day weather outlook, and the seasonal commodity price curve. It produces a season operations calendar showing: projected planting windows for next season's crops, irrigation water budget allocation by zone, expected harvest windows by zone, and forward contracting recommendations based on projected yield and current price.
+
+This module is a planner-executor pattern sitting above the existing hierarchical multi-agent system. The season planner creates the high-level plan. The daily monitoring cycle executes within that plan and flags deviations.
+
+---
+
+### Step 6 — Containerise and Deploy on Farm Infrastructure
+
+Package the system as a Docker container for reliable deployment on farm infrastructure. Farm internet connectivity is often intermittent. The container should be designed to run on a farm-local server (a NUC or Raspberry Pi 5 in the farm office) with local storage for the database, and synchronise to a cloud backup when connectivity is available.
+
+The local deployment model is important for farms in areas with unreliable connectivity. The system must continue to generate reports and send mobile notifications even when cloud connectivity is unavailable for hours at a time. This means the database, the API, and the agent all run on the local device, and the mobile app connects to the local network when on-farm and to the cloud sync when off-farm.
+
+For farms with reliable connectivity, a cloud deployment on Railway or Render is the simpler option and can be done in one day.
+
+---
+
+## Priority Order
+
+Step 1 — HITL for high-cost field operations — 2 to 3 days — prevents costly mistakes from unreviewed AI recommendations
+
+Step 2 — Connect OpenWeatherMap and soil sensor API — 2 days — real data for real decisions
+
+Step 3 — FastAPI and mobile web interface — 3 to 4 days — makes the system usable in the field
+
+Step 4 — Long-term agronomic memory with PostgreSQL — 3 to 4 days — trend detection and recommendation quality
+
+Step 5 — Season-long planning module — 1 to 2 weeks — transforms from reactive to strategic
+
+Step 6 — Local Docker deployment — 2 days — reliable operation under poor connectivity
