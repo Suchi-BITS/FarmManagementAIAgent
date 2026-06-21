@@ -587,8 +587,8 @@ RAG KNOWLEDGE RETRIEVED:
 
 ---
 How to Run
-1. Clone the repo
-2. Create venv
+1. Clone the repo:  git clone https://github.com/Suchi-BITS/FarmManagementAIAgent.git
+2. Create venv 
 3. Update .env
 4. pip install -r requirements.txt
 5. python main.py
